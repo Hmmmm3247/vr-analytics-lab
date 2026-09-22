@@ -496,15 +496,22 @@ function debounce(fn, ms) {
 
 async function checkApiStatus() {
   const statusEl = document.getElementById("apiStatus");
-  try {
-    const res = await fetch(`${API_BASE_URL}/api/health`, { signal: AbortSignal.timeout(2000) });
-    if (res.ok) {
-      statusEl.textContent = "API connected";
-      statusEl.className = "ok";
-      return true;
+  // Two attempts: a cold serverless function (numpy/scikit-learn import
+  // + unpickling the model) can take longer than a couple seconds on
+  // its first request, especially over a slow mobile connection -- one
+  // slow miss shouldn't permanently disable live predictions for the
+  // whole page load.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/health`, { signal: AbortSignal.timeout(8000) });
+      if (res.ok) {
+        statusEl.textContent = "API connected";
+        statusEl.className = "ok";
+        return true;
+      }
+    } catch (err) {
+      // fall through to retry / offline state
     }
-  } catch (err) {
-    // fall through
   }
   statusEl.textContent = "API offline (static mode)";
   statusEl.className = "down";
