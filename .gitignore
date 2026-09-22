@@ -1,0 +1,13 @@
+venv/
+__pycache__/
+*.pyc
+.vercel/
+
+# Kaggle credentials -- never commit
+kaggle.json
+
+# Raw dataset -- large / re-downloadable, not needed by the deployed app
+data/raw/*.csv
+
+# superseded by scene/scene_data.json (train_and_save.py writes there now)
+exports/

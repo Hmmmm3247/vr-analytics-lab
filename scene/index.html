@@ -1,0 +1,603 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>VR Predictive Analytics Lab</title>
+<style>
+  html, body { margin: 0; padding: 0; overflow: hidden; background: #05070d; }
+  #renderCanvas { width: 100%; height: 100%; touch-action: none; }
+
+  #ui {
+    position: fixed; top: 20px; left: 20px; width: 280px;
+    background: rgba(13,20,36,0.75); border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 14px; padding: 18px; color: #e7ecf5;
+    font-family: -apple-system, sans-serif; backdrop-filter: blur(8px);
+  }
+  #ui h2 { font-size: 13px; letter-spacing: 1px; color: #7b8aa3; margin: 0 0 14px; font-weight: 500; }
+  #ui label { display: block; margin-bottom: 16px; font-size: 13px; }
+  #ui .row { display: flex; justify-content: space-between; margin-bottom: 6px; }
+  #ui .val { color: #5eead4; font-family: monospace; }
+  #ui input[type=range] { width: 100%; accent-color: #5eead4; }
+  #prediction { margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.1); }
+  #prediction .num { font-size: 28px; font-weight: 700; color: #5eead4; }
+  #attackBtn {
+    width: 100%; margin-top: 14px; padding: 10px; border-radius: 8px;
+    border: 1px solid rgba(248,113,113,0.4); background: rgba(248,113,113,0.1);
+    color: #f87171; font-family: monospace; font-size: 12px; cursor: pointer;
+  }
+  #vrBtn {
+    position: fixed; bottom: 20px; right: 20px; padding: 12px 20px;
+    border-radius: 10px; border: 1px solid rgba(94,234,212,0.4);
+    background: rgba(94,234,212,0.12); color: #5eead4;
+    font-family: -apple-system, sans-serif; font-size: 13px; cursor: pointer;
+  }
+  #attackBtn:disabled { opacity: 0.4; cursor: not-allowed; }
+  #apiStatus {
+    position: fixed; top: 20px; right: 20px; padding: 8px 14px;
+    border-radius: 8px; font-family: monospace; font-size: 11px;
+    background: rgba(13,20,36,0.75); border: 1px solid rgba(255,255,255,0.1);
+  }
+  #apiStatus.ok { color: #5eead4; border-color: rgba(94,234,212,0.3); }
+  #apiStatus.down { color: #f87171; border-color: rgba(248,113,113,0.3); }
+</style>
+</head>
+<body>
+
+<canvas id="renderCanvas"></canvas>
+<div id="apiStatus">checking API...</div>
+
+<div id="ui">
+  <h2>MODEL INPUTS</h2>
+  <div id="sliders"></div>
+  <div id="prediction">
+    <div class="row"><span>Next-Day Close</span></div>
+    <div class="num" id="predVal">--</div>
+    <div style="font-size:11px; color:#7b8aa3;">confidence: <span id="predConf">--</span></div>
+  </div>
+  <button id="attackBtn">⚠ RUN ADVERSARIAL ATTACK</button>
+</div>
+
+<button id="vrBtn">Enter VR</button>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babylonjs/7.24.0/babylon.js"></script>
+<script>
+// ---------------------------------------------------------------
+// CONFIG: scene_data.json lives alongside this file (written by
+// train_and_save.py) so a relative fetch works whether this is
+// served from scene/ directly (local dev) or from the site root
+// (deployed -- vercel.json sets outputDirectory to scene/).
+// ---------------------------------------------------------------
+const SCENE_DATA_URL = "scene_data.json";
+
+// Same-origin in production (Vercel rewrites /api/* to the Flask
+// function). Locally, run `python api.py --csv ... --ticker AAPL`
+// separately on :5000 and serve this file with e.g. `python -m
+// http.server` from the scene/ folder.
+const API_BASE_URL =
+  (location.hostname === "localhost" || location.hostname === "127.0.0.1")
+    ? "http://localhost:5000"
+    : "";
+
+const canvas = document.getElementById("renderCanvas");
+let engine, scene;
+
+async function createEngine() {
+  // Prefer WebGPU, fall back to WebGL if the browser/device doesn't support it.
+  if (await BABYLON.WebGPUEngine.IsSupportedAsync) {
+    const gpuEngine = new BABYLON.WebGPUEngine(canvas);
+    await gpuEngine.initAsync();
+    console.log("Using WebGPU");
+    return gpuEngine;
+  }
+  console.log("WebGPU unavailable -- falling back to WebGL");
+  return new BABYLON.Engine(canvas, true);
+}
+
+async function loadSceneData() {
+  // Scene data is static (written by train_and_save.py) -- the API
+  // only serves live predictions/attacks, not the initial payload.
+  // Fall back to a placeholder so the scene still renders either way.
+  try {
+    const res = await fetch(SCENE_DATA_URL);
+    return await res.json();
+  } catch (err) {
+    console.warn("Could not load scene data, using placeholder:", err);
+    return {
+      dataset_id: "placeholder",
+      label: "Placeholder Data",
+      inputs: [
+        { key: "volume_norm", label: "Trading Volume", min: 0, max: 100, default: 50 },
+        { key: "volatility", label: "Volatility Index", min: 0, max: 100, default: 30 },
+        { key: "momentum", label: "Price Momentum", min: -1, max: 1, default: 0 }
+      ],
+      prediction: { label: "Next-Day Close", unit: "$", value: 150, confidence: 0.5 },
+      series: [140, 150, 145, 160, 155, 170, 165, 180]
+    };
+  }
+}
+
+function buildScene(engine, data) {
+  const scene = new BABYLON.Scene(engine);
+  scene.clearColor = new BABYLON.Color4(0.01, 0.01, 0.03, 1);
+
+  // depth fog so the platform edge fades into the void instead of
+  // just stopping -- cheap and does a lot for "floating in space" feel
+  scene.fogMode = BABYLON.Scene.FOGMODE_EXP2;
+  scene.fogColor = new BABYLON.Color3(0.02, 0.02, 0.05);
+  scene.fogDensity = 0.02;
+
+  // camera: walk-around on desktop, headset takes over in VR
+  const camera = new BABYLON.UniversalCamera("cam", new BABYLON.Vector3(0, 1.7, -9), scene);
+  camera.attachControl(canvas, true);
+  camera.speed = 0.3;
+  camera.keysUp.push(87);    // W
+  camera.keysDown.push(83);  // S
+  camera.keysLeft.push(65);  // A
+  camera.keysRight.push(68); // D
+
+  // --- procedural starfield/nebula skybox -----------------------
+  // Painted onto a DynamicTexture instead of loading an external
+  // image -- guarantees it always renders, no broken-asset risk.
+  const skyTexSize = 1024;
+  const skyTex = new BABYLON.DynamicTexture("skyTex", skyTexSize, scene, false);
+  const ctx = skyTex.getContext();
+
+  const gradient = ctx.createRadialGradient(
+    skyTexSize / 2, skyTexSize / 2, 0,
+    skyTexSize / 2, skyTexSize / 2, skyTexSize / 1.3
+  );
+  gradient.addColorStop(0, "#1a1233");
+  gradient.addColorStop(0.4, "#0d1524");
+  gradient.addColorStop(1, "#020208");
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, skyTexSize, skyTexSize);
+
+  // nebula-ish soft color blobs
+  const blobs = [
+    { x: 0.3, y: 0.3, r: 300, color: "rgba(94,234,212,0.10)" },
+    { x: 0.7, y: 0.4, r: 260, color: "rgba(217,119,87,0.08)" },
+    { x: 0.5, y: 0.7, r: 340, color: "rgba(94,234,212,0.06)" },
+  ];
+  blobs.forEach(b => {
+    const bg = ctx.createRadialGradient(
+      b.x * skyTexSize, b.y * skyTexSize, 0,
+      b.x * skyTexSize, b.y * skyTexSize, b.r
+    );
+    bg.addColorStop(0, b.color);
+    bg.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, skyTexSize, skyTexSize);
+  });
+
+  // stars
+  for (let i = 0; i < 800; i++) {
+    const x = Math.random() * skyTexSize;
+    const y = Math.random() * skyTexSize;
+    const r = Math.random() * 1.4 + 0.2;
+    const brightness = Math.random() * 0.6 + 0.4;
+    ctx.fillStyle = `rgba(255,255,255,${brightness})`;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  skyTex.update();
+
+  const skySphere = BABYLON.MeshBuilder.CreateSphere("sky", { diameter: 200, segments: 16 }, scene);
+  skySphere.infiniteDistance = true;
+  const skyMat = new BABYLON.StandardMaterial("skyMat", scene);
+  skyMat.emissiveTexture = skyTex;
+  skyMat.diffuseColor = new BABYLON.Color3(0, 0, 0);
+  skyMat.specularColor = new BABYLON.Color3(0, 0, 0);
+  skyMat.backFaceCulling = false;
+  skySphere.material = skyMat;
+  skySphere.infiniteDistance = true;
+
+  // lighting: soft ambient + a rim light so the bars pop
+  new BABYLON.HemisphericLight("ambient", new BABYLON.Vector3(0, 1, 0), scene).intensity = 0.35;
+  const point = new BABYLON.PointLight("rim", new BABYLON.Vector3(0, 5, -5), scene);
+  point.diffuse = new BABYLON.Color3(0.37, 0.92, 0.83); // teal
+  point.intensity = 0.7;
+
+  // --- floating circular platform instead of an infinite flat floor
+  const platform = BABYLON.MeshBuilder.CreateCylinder("platform", {
+    diameter: 16, height: 0.3, tessellation: 48
+  }, scene);
+  platform.position.y = -0.15;
+  const platformMat = new BABYLON.StandardMaterial("platformMat", scene);
+  platformMat.diffuseColor = new BABYLON.Color3(0.04, 0.06, 0.09);
+  platformMat.specularColor = new BABYLON.Color3(0.1, 0.1, 0.1);
+  platform.material = platformMat;
+
+  // glowing ring on the platform edge
+  const ring = BABYLON.MeshBuilder.CreateTorus("ring", { diameter: 15.8, thickness: 0.06, tessellation: 64 }, scene);
+  ring.position.y = 0.02;
+  const ringMat = new BABYLON.StandardMaterial("ringMat", scene);
+  ringMat.emissiveColor = new BABYLON.Color3(0.37, 0.92, 0.83);
+  ring.material = ringMat;
+
+  // concentric grid rings on the platform (reads as "data floor" without being an infinite grid)
+  for (let r = 2; r <= 7; r += 2.5) {
+    const gridRing = BABYLON.MeshBuilder.CreateTorus(`gridRing${r}`, { diameter: r * 2, thickness: 0.015, tessellation: 48 }, scene);
+    gridRing.position.y = 0.02;
+    const gm = new BABYLON.StandardMaterial(`gridRingMat${r}`, scene);
+    gm.emissiveColor = new BABYLON.Color3(0.37, 0.92, 0.83);
+    gm.alpha = 0.25;
+    gridRing.material = gm;
+  }
+
+  // ================================================================
+  // DATA EXPLORATION AREA -- candlestick chart + trend line
+  // ================================================================
+  const candles = data.candles && data.candles.length ? data.candles : null;
+  const barMeshes = [];
+  const series = data.series;
+  const spacing = 1.6;
+  const chartCount = candles ? candles.length : series.length;
+  const startX = -((chartCount - 1) * spacing) / 2;
+
+  const allVals = candles
+    ? candles.flatMap(c => [c.high, c.low])
+    : series;
+  const minVal = Math.min(...allVals);
+  const maxVal = Math.max(...allVals);
+  const range = maxVal - minVal || 1;
+  const chartHeight = 5;
+  const toY = v => ((v - minVal) / range) * chartHeight + 0.3;
+
+  const trendPoints = [];
+
+  if (candles) {
+    candles.forEach((c, i) => {
+      const x = startX + i * spacing;
+      const isUp = c.close >= c.open;
+      const color = isUp
+        ? new BABYLON.Color3(0.37, 0.92, 0.83)   // teal = up day
+        : new BABYLON.Color3(0.85, 0.47, 0.34);  // clay = down day
+
+      // wick: thin cylinder spanning low -> high
+      const wickBottom = toY(c.low);
+      const wickTop = toY(c.high);
+      const wick = BABYLON.MeshBuilder.CreateCylinder(`wick${i}`, {
+        diameter: 0.06, height: wickTop - wickBottom
+      }, scene);
+      wick.position.set(x, (wickTop + wickBottom) / 2, 2);
+      const wickMat = new BABYLON.StandardMaterial(`wickMat${i}`, scene);
+      wickMat.emissiveColor = color.scale(0.5);
+      wick.material = wickMat;
+
+      // body: box spanning open -> close
+      const bodyBottom = toY(Math.min(c.open, c.close));
+      const bodyTop = toY(Math.max(c.open, c.close));
+      const bodyHeight = Math.max(bodyTop - bodyBottom, 0.08);
+      const body = BABYLON.MeshBuilder.CreateBox(`candle${i}`, {
+        width: 0.7, height: bodyHeight, depth: 0.5
+      }, scene);
+      body.position.set(x, bodyBottom + bodyHeight / 2, 2);
+      const bodyMat = new BABYLON.StandardMaterial(`candleMat${i}`, scene);
+      bodyMat.emissiveColor = color.scale(0.6);
+      bodyMat.diffuseColor = color;
+      body.material = bodyMat;
+      barMeshes.push(body);
+
+      trendPoints.push(new BABYLON.Vector3(x, toY(c.close), 1.4));
+    });
+  } else {
+    // fallback: plain bars if candle data isn't available
+    series.forEach((val, i) => {
+      const x = startX + i * spacing;
+      const height = toY(val);
+      const bar = BABYLON.MeshBuilder.CreateBox(`bar${i}`, { width: 0.7, height, depth: 0.5 }, scene);
+      bar.position.set(x, height / 2, 2);
+      const mat = new BABYLON.StandardMaterial(`barMat${i}`, scene);
+      const accent = i % 2 === 0 ? new BABYLON.Color3(0.85, 0.47, 0.34) : new BABYLON.Color3(0.37, 0.92, 0.83);
+      mat.emissiveColor = accent.scale(0.6);
+      mat.diffuseColor = accent;
+      bar.material = mat;
+      barMeshes.push(bar);
+      trendPoints.push(new BABYLON.Vector3(x, height, 1.4));
+    });
+  }
+
+  // glowing trend line floating just in front of the candles
+  if (trendPoints.length > 1) {
+    const trendLine = BABYLON.MeshBuilder.CreateLines("trendLine", { points: trendPoints }, scene);
+    trendLine.color = new BABYLON.Color3(0.95, 0.95, 0.9);
+    const trendTube = BABYLON.MeshBuilder.CreateTube("trendTube", {
+      path: trendPoints, radius: 0.03, tessellation: 8
+    }, scene);
+    const trendMat = new BABYLON.StandardMaterial("trendMat", scene);
+    trendMat.emissiveColor = new BABYLON.Color3(0.95, 0.95, 0.9);
+    trendTube.material = trendMat;
+  }
+
+  // floating price labels above first/last candle (billboarded text)
+  function makeLabel(text, position, color) {
+    const plane = BABYLON.MeshBuilder.CreatePlane(`label_${text}`, { width: 2, height: 0.5 }, scene);
+    plane.position = position;
+    plane.billboardMode = BABYLON.Mesh.BILLBOARDMODE_ALL;
+    const tex = new BABYLON.DynamicTexture(`labelTex_${text}`, { width: 256, height: 64 }, scene, false);
+    tex.hasAlpha = true;
+    tex.drawText(text, null, 44, "bold 40px monospace", color, "transparent", true);
+    const mat = new BABYLON.StandardMaterial(`labelMat_${text}`, scene);
+    mat.diffuseTexture = tex;
+    mat.emissiveColor = new BABYLON.Color3(1, 1, 1);
+    mat.opacityTexture = tex;
+    mat.backFaceCulling = false;
+    plane.material = mat;
+    return plane;
+  }
+  if (candles) {
+    makeLabel(`$${candles[0].close}`, new BABYLON.Vector3(startX, toY(candles[0].close) + 0.6, 1.4), "#d97757");
+    const last = candles[candles.length - 1];
+    makeLabel(`$${last.close}`, new BABYLON.Vector3(startX + (chartCount - 1) * spacing, toY(last.close) + 0.6, 1.4), "#5eead4");
+  }
+
+  // ================================================================
+  // MODELLING AREA -- floating prediction orb + confidence gauge
+  // (positioned behind/above the candles, a visually distinct zone)
+  // ================================================================
+  const orbPos = new BABYLON.Vector3(0, 3.2, -3);
+  const orb = BABYLON.MeshBuilder.CreateSphere("predictionOrb", { diameter: 1.1, segments: 24 }, scene);
+  orb.position = orbPos;
+  const orbMat = new BABYLON.StandardMaterial("orbMat", scene);
+  orbMat.emissiveColor = new BABYLON.Color3(0.37, 0.92, 0.83);
+  orbMat.alpha = 0.85;
+  orb.material = orbMat;
+
+  // confidence gauge: an arc built from tube segments, filled
+  // proportionally to data.prediction.confidence (0-1)
+  const confidence = data.prediction.confidence ?? 0;
+  const gaugeRadius = 1.6;
+  const totalSegments = 40;
+  const filledSegments = Math.round(totalSegments * confidence);
+  for (let i = 0; i < totalSegments; i++) {
+    const angle = (i / totalSegments) * Math.PI * 1.5 - Math.PI * 0.75; // 270-degree arc
+    const next = ((i + 1) / totalSegments) * Math.PI * 1.5 - Math.PI * 0.75;
+    const p1 = new BABYLON.Vector3(orbPos.x + Math.cos(angle) * gaugeRadius, orbPos.y + Math.sin(angle) * gaugeRadius, orbPos.z);
+    const p2 = new BABYLON.Vector3(orbPos.x + Math.cos(next) * gaugeRadius, orbPos.y + Math.sin(next) * gaugeRadius, orbPos.z);
+    const seg = BABYLON.MeshBuilder.CreateTube(`gaugeSeg${i}`, { path: [p1, p2], radius: 0.05 }, scene);
+    const segMat = new BABYLON.StandardMaterial(`gaugeSegMat${i}`, scene);
+    const isFilled = i < filledSegments;
+    segMat.emissiveColor = isFilled
+      ? new BABYLON.Color3(0.37, 0.92, 0.83)
+      : new BABYLON.Color3(0.15, 0.15, 0.18);
+    seg.material = segMat;
+  }
+  makeLabel(`${Math.round(confidence * 100)}% CONFIDENCE`, new BABYLON.Vector3(orbPos.x, orbPos.y - 2.1, orbPos.z), "#7b8aa3");
+
+  // gentle bob + spin on the orb so the "modelling area" reads as alive
+  scene.registerBeforeRender(() => {
+    const t = performance.now() * 0.001;
+    orb.position.y = orbPos.y + Math.sin(t) * 0.15;
+    orb.rotation.y = t * 0.5;
+  });
+
+  // ================================================================
+  // ATMOSPHERE -- light-beam pillars at the platform edge, glow, dust
+  // ================================================================
+  const pillarCount = 6;
+  for (let i = 0; i < pillarCount; i++) {
+    const angle = (i / pillarCount) * Math.PI * 2;
+    const px = Math.cos(angle) * 7.5;
+    const pz = Math.sin(angle) * 7.5;
+    const beam = BABYLON.MeshBuilder.CreateCylinder(`beam${i}`, {
+      diameterTop: 0.02, diameterBottom: 0.4, height: 8, tessellation: 12
+    }, scene);
+    beam.position.set(px, 4, pz);
+    const beamMat = new BABYLON.StandardMaterial(`beamMat${i}`, scene);
+    beamMat.emissiveColor = i % 2 === 0
+      ? new BABYLON.Color3(0.37, 0.92, 0.83)
+      : new BABYLON.Color3(0.85, 0.47, 0.34);
+    beamMat.alpha = 0.06;
+    beamMat.backFaceCulling = false;
+    beam.material = beamMat;
+  }
+
+  // real glow/bloom on emissive surfaces -- biggest visual upgrade for cheapest effort
+  const glow = new BABYLON.GlowLayer("glow", scene);
+  glow.intensity = 0.8;
+
+  // slow ambient rotation of the whole sky so the space feels alive, not static
+  scene.registerBeforeRender(() => {
+    skySphere.rotation.y += 0.00015;
+  });
+
+  // drifting star-dust particles (procedural texture, no external asset)
+  const particleTexSize = 32;
+  const particleTex = new BABYLON.DynamicTexture("particleTex", particleTexSize, scene, false);
+  const pctx = particleTex.getContext();
+  const pg = pctx.createRadialGradient(16, 16, 0, 16, 16, 16);
+  pg.addColorStop(0, "rgba(255,255,255,1)");
+  pg.addColorStop(1, "rgba(255,255,255,0)");
+  pctx.fillStyle = pg;
+  pctx.fillRect(0, 0, particleTexSize, particleTexSize);
+  particleTex.update();
+
+  const particleSystem = new BABYLON.ParticleSystem("particles", 300, scene);
+  particleSystem.particleTexture = particleTex;
+  particleSystem.emitter = new BABYLON.Vector3(0, 3, 0);
+  particleSystem.minEmitBox = new BABYLON.Vector3(-8, 0, -8);
+  particleSystem.maxEmitBox = new BABYLON.Vector3(8, 7, 8);
+  particleSystem.color1 = new BABYLON.Color4(0.37, 0.92, 0.83, 0.5);
+  particleSystem.color2 = new BABYLON.Color4(0.85, 0.47, 0.34, 0.35);
+  particleSystem.minSize = 0.02;
+  particleSystem.maxSize = 0.07;
+  particleSystem.minLifeTime = 2;
+  particleSystem.maxLifeTime = 6;
+  particleSystem.emitRate = 25;
+  particleSystem.direction1 = new BABYLON.Vector3(0, 0.15, 0);
+  particleSystem.direction2 = new BABYLON.Vector3(0, 0.35, 0);
+  particleSystem.start();
+
+  return { scene, camera, barMeshes, maxVal: maxVal, minVal, range, chartHeight, series };
+}
+
+// Rescales the LAST candle body toward a new predicted price, with a
+// smooth grow/shrink animation -- this is what makes a slider drag
+// or an attack visually register in the 3D space.
+function animateLastBarTo(barMeshes, minVal, range, chartHeight, newValue) {
+  const bar = barMeshes[barMeshes.length - 1];
+  const toY = v => ((v - minVal) / range) * chartHeight + 0.3;
+  const targetHeight = Math.max(toY(newValue) - 0.3, 0.08);
+  const currentHeight = bar.getBoundingInfo().boundingBox.extendSize.y * 2 * bar.scaling.y;
+  const scaleFactor = targetHeight / (currentHeight / bar.scaling.y);
+
+  BABYLON.Animation.CreateAndStartAnimation(
+    "barGrow", bar, "scaling.y", 30, 20, bar.scaling.y, scaleFactor, 0
+  );
+  bar.position.y = targetHeight / 2;
+}
+
+function bindUI(data, onInputChange) {
+  const container = document.getElementById("sliders");
+  data.inputs.forEach(input => {
+    const wrapper = document.createElement("label");
+    wrapper.innerHTML = `
+      <div class="row"><span>${input.label}</span><span class="val" id="val_${input.key}">${input.default}</span></div>
+      <input type="range" id="slider_${input.key}" min="${input.min}" max="${input.max}" step="0.01" value="${input.default}">
+    `;
+    container.appendChild(wrapper);
+
+    wrapper.querySelector("input").addEventListener("input", (e) => {
+      document.getElementById(`val_${input.key}`).textContent = parseFloat(e.target.value).toFixed(2);
+      onInputChange();
+    });
+  });
+
+  document.getElementById("predVal").textContent =
+    `${data.prediction.unit}${data.prediction.value}`;
+  document.getElementById("predConf").textContent =
+    `${Math.round(data.prediction.confidence * 100)}%`;
+}
+
+function readSliderValues(data) {
+  const values = {};
+  data.inputs.forEach(input => {
+    values[input.key] = parseFloat(document.getElementById(`slider_${input.key}`).value);
+  });
+  return values;
+}
+
+function setSliderValues(data, values) {
+  data.inputs.forEach(input => {
+    const slider = document.getElementById(`slider_${input.key}`);
+    slider.value = values[input.key];
+    document.getElementById(`val_${input.key}`).textContent = parseFloat(values[input.key]).toFixed(2);
+  });
+}
+
+function debounce(fn, ms) {
+  let timer;
+  return (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), ms);
+  };
+}
+
+async function checkApiStatus() {
+  const statusEl = document.getElementById("apiStatus");
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/health`, { signal: AbortSignal.timeout(2000) });
+    if (res.ok) {
+      statusEl.textContent = "API connected";
+      statusEl.className = "ok";
+      return true;
+    }
+  } catch (err) {
+    // fall through
+  }
+  statusEl.textContent = "API offline (static mode)";
+  statusEl.className = "down";
+  return false;
+}
+
+async function main() {
+  const data = await loadSceneData();
+  const apiOnline = await checkApiStatus();
+
+  engine = await createEngine();
+  const { scene, camera, barMeshes, minVal, range, chartHeight } = buildScene(engine, data);
+  window.__scene = scene; // handy for debugging in devtools
+
+  const attackBtn = document.getElementById("attackBtn");
+  if (!apiOnline) attackBtn.disabled = true;
+
+  // --- live prediction on slider change, debounced so it doesn't
+  // fire a request on every pixel of a drag ---
+  const updatePrediction = debounce(async () => {
+    if (!apiOnline) return; // no API -- sliders just show local values, no live prediction
+    const inputs = readSliderValues(data);
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/predict`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(inputs)
+      });
+      const result = await res.json();
+      document.getElementById("predVal").textContent = `$${result.prediction}`;
+      animateLastBarTo(barMeshes, minVal, range, chartHeight, result.prediction);
+    } catch (err) {
+      console.error("Prediction request failed:", err);
+    }
+  }, 250);
+
+  bindUI(data, updatePrediction);
+
+  // --- adversarial attack ---
+  attackBtn.addEventListener("click", async () => {
+    if (!apiOnline) return;
+    attackBtn.disabled = true;
+    attackBtn.textContent = "RUNNING ATTACK...";
+
+    try {
+      const inputs = readSliderValues(data);
+      const res = await fetch(`${API_BASE_URL}/api/adversarial-attack`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(inputs)
+      });
+      const attack = await res.json();
+
+      // dramatic visual: flash red, move sliders to the perturbed
+      // values that fooled the model, show the shift
+      const predEl = document.getElementById("predVal");
+      predEl.style.color = "#f87171";
+      predEl.textContent = `$${attack.attacked_prediction}`;
+      setSliderValues(data, attack.perturbed_inputs);
+      animateLastBarTo(barMeshes, minVal, range, chartHeight, attack.attacked_prediction);
+
+      console.log(
+        `Attack shifted prediction from $${attack.original_prediction} to ` +
+        `$${attack.attacked_prediction} (${attack.shift_percent}%) by nudging inputs.`
+      );
+
+      setTimeout(() => { predEl.style.color = "#5eead4"; }, 2000);
+    } catch (err) {
+      console.error("Adversarial attack request failed:", err);
+    } finally {
+      attackBtn.disabled = false;
+      attackBtn.textContent = "⚠ RUN ADVERSARIAL ATTACK";
+    }
+  });
+
+  // WebXR (VR headset) support
+  try {
+    const xrHelper = await scene.createDefaultXRExperienceAsync({
+      floorMeshes: [scene.getMeshByName("platform")]
+    });
+    document.getElementById("vrBtn").addEventListener("click", () => {
+      xrHelper.baseExperience.enterXRAsync("immersive-vr", "local-floor");
+    });
+  } catch (err) {
+    console.warn("WebXR not available on this device/browser:", err);
+    document.getElementById("vrBtn").style.display = "none";
+  }
+
+  engine.runRenderLoop(() => scene.render());
+  window.addEventListener("resize", () => engine.resize());
+}
+
+main();
+</script>
+</body>
+</html>

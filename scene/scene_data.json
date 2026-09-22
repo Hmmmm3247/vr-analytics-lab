@@ -1,0 +1,133 @@
+{
+  "dataset_id": "aapl",
+  "label": "AAPL \u2014 Historical Price Data",
+  "inputs": [
+    {
+      "key": "volume_norm",
+      "label": "Trading Volume",
+      "min": 0,
+      "max": 100,
+      "default": 7.68
+    },
+    {
+      "key": "volatility",
+      "label": "Volatility Index",
+      "min": 0,
+      "max": 100,
+      "default": 4.0
+    },
+    {
+      "key": "momentum",
+      "label": "Price Momentum",
+      "min": -1,
+      "max": 1,
+      "default": -0.01
+    }
+  ],
+  "prediction": {
+    "label": "Next-Day Close",
+    "unit": "$",
+    "value": 193.3,
+    "confidence": 0.0
+  },
+  "series": [
+    194.2,
+    197.44,
+    197.59,
+    197.05,
+    195.38,
+    196.42,
+    194.32,
+    194.17,
+    193.09,
+    192.54,
+    192.64,
+    193.07
+  ],
+  "candles": [
+    {
+      "date": "2023-12-12",
+      "open": 193.08,
+      "high": 194.72,
+      "low": 191.72,
+      "close": 194.2
+    },
+    {
+      "date": "2023-12-13",
+      "open": 195.09,
+      "high": 198.0,
+      "low": 194.85,
+      "close": 197.44
+    },
+    {
+      "date": "2023-12-14",
+      "open": 198.02,
+      "high": 199.62,
+      "low": 196.16,
+      "close": 197.59
+    },
+    {
+      "date": "2023-12-15",
+      "open": 197.53,
+      "high": 198.4,
+      "low": 197.0,
+      "close": 197.05
+    },
+    {
+      "date": "2023-12-18",
+      "open": 196.09,
+      "high": 196.63,
+      "low": 194.39,
+      "close": 195.38
+    },
+    {
+      "date": "2023-12-19",
+      "open": 196.16,
+      "high": 196.95,
+      "low": 195.89,
+      "close": 196.42
+    },
+    {
+      "date": "2023-12-20",
+      "open": 196.9,
+      "high": 197.68,
+      "low": 194.83,
+      "close": 194.32
+    },
+    {
+      "date": "2023-12-21",
+      "open": 196.1,
+      "high": 197.08,
+      "low": 193.5,
+      "close": 194.17
+    },
+    {
+      "date": "2023-12-22",
+      "open": 195.18,
+      "high": 195.41,
+      "low": 192.97,
+      "close": 193.09
+    },
+    {
+      "date": "2023-12-26",
+      "open": 193.61,
+      "high": 193.89,
+      "low": 192.83,
+      "close": 192.54
+    },
+    {
+      "date": "2023-12-27",
+      "open": 192.49,
+      "high": 193.5,
+      "low": 191.09,
+      "close": 192.64
+    },
+    {
+      "date": "2023-12-28",
+      "open": 194.14,
+      "high": 194.66,
+      "low": 193.17,
+      "close": 193.07
+    }
+  ]
+}
