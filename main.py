@@ -36,7 +36,7 @@ def run(csv_path: str, ticker: str | None, output_dir: str) -> None:
     dataset_id = (ticker or "synthetic").lower()
     label = f"{ticker or 'Synthetic Stock'} — Historical Price Data"
 
-    payload = build_scene_payload(dataset_id, label, feat_df, result)
+    payload = build_scene_payload(dataset_id, label, feat_df, result, importances=trained.importances)
 
     output_path = f"{output_dir}/{dataset_id}_scene_data.json"
     save_scene_payload(payload, output_path)

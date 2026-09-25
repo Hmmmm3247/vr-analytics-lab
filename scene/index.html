@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <title>VR Predictive Analytics Lab</title>
 <style>
-  html, body { margin: 0; padding: 0; overflow: hidden; background: #05070d; }
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #05070d; }
   #renderCanvas { width: 100%; height: 100%; touch-action: none; }
 
   #ui {
@@ -18,6 +18,13 @@
   #ui .row { display: flex; justify-content: space-between; margin-bottom: 6px; }
   #ui .val { color: #5eead4; font-family: monospace; }
   #ui input[type=range] { width: 100%; accent-color: #5eead4; }
+  #ui .caption { font-size: 10px; color: #7b8aa3; margin: -8px 0 14px; line-height: 1.4; }
+  #ui .contrib { display: flex; align-items: center; gap: 8px; margin-top: 4px; font-size: 10px; color: #7b8aa3; }
+  #ui .contrib .imp { width: 50px; }
+  #ui .contrib .track { position: relative; flex: 1; height: 6px; background: rgba(255,255,255,0.06); border-radius: 3px; }
+  #ui .contrib .track::after { content: ""; position: absolute; left: 50%; top: -2px; width: 1px; height: 10px; background: rgba(255,255,255,0.3); }
+  #ui .contrib .fill { position: absolute; top: 0; height: 100%; left: 50%; width: 0; border-radius: 3px; transition: left 0.25s, width 0.25s; }
+  #ui .contrib .num { width: 52px; text-align: right; font-family: monospace; }
   #prediction { margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.1); }
   #prediction .num { font-size: 28px; font-weight: 700; color: #5eead4; }
   #attackBtn {
@@ -48,6 +55,7 @@
 
 <div id="ui">
   <h2>MODEL INPUTS</h2>
+  <div class="caption">Bar under each slider: dollars that input moves the prediction vs. a typical day. "imp" = the model's overall reliance on it.</div>
   <div id="sliders"></div>
   <div id="prediction">
     <div class="row"><span>Next-Day Close</span></div>
@@ -127,7 +135,7 @@ function buildScene(engine, data) {
   scene.fogDensity = 0.02;
 
   // camera: walk-around on desktop, headset takes over in VR
-  const camera = new BABYLON.UniversalCamera("cam", new BABYLON.Vector3(0, 1.7, -9), scene);
+  const camera = new BABYLON.UniversalCamera("cam", new BABYLON.Vector3(0, 1.7, -12), scene);
   camera.attachControl(canvas, true);
   camera.speed = 0.3;
   camera.keysUp.push(87);    // W
@@ -229,15 +237,16 @@ function buildScene(engine, data) {
   // DATA EXPLORATION AREA -- candlestick chart + trend line
   // ================================================================
   const candles = data.candles && data.candles.length ? data.candles : null;
-  const barMeshes = [];
   const series = data.series;
-  const spacing = 1.6;
-  const chartCount = candles ? candles.length : series.length;
+  const spacing = 1.2;
+  const historyCount = candles ? candles.length : series.length;
+  const chartCount = historyCount + 1; // +1 slot for the live predicted bar
   const startX = -((chartCount - 1) * spacing) / 2;
 
-  const allVals = candles
-    ? candles.flatMap(c => [c.high, c.low])
-    : series;
+  const allVals = [
+    ...(candles ? candles.flatMap(c => [c.high, c.low]) : series),
+    data.prediction.value,
+  ];
   const minVal = Math.min(...allVals);
   const maxVal = Math.max(...allVals);
   const range = maxVal - minVal || 1;
@@ -277,7 +286,6 @@ function buildScene(engine, data) {
       bodyMat.emissiveColor = color.scale(0.6);
       bodyMat.diffuseColor = color;
       body.material = bodyMat;
-      barMeshes.push(body);
 
       trendPoints.push(new BABYLON.Vector3(x, toY(c.close), 1.4));
     });
@@ -293,7 +301,6 @@ function buildScene(engine, data) {
       mat.emissiveColor = accent.scale(0.6);
       mat.diffuseColor = accent;
       bar.material = mat;
-      barMeshes.push(bar);
       trendPoints.push(new BABYLON.Vector3(x, height, 1.4));
     });
   }
@@ -329,8 +336,32 @@ function buildScene(engine, data) {
   if (candles) {
     makeLabel(`$${candles[0].close}`, new BABYLON.Vector3(startX, toY(candles[0].close) + 0.6, 1.4), "#d97757");
     const last = candles[candles.length - 1];
-    makeLabel(`$${last.close}`, new BABYLON.Vector3(startX + (chartCount - 1) * spacing, toY(last.close) + 0.6, 1.4), "#5eead4");
+    makeLabel(`$${last.close}`, new BABYLON.Vector3(startX + (historyCount - 1) * spacing, toY(last.close) + 0.6, 1.4), "#5eead4");
   }
+
+  // --- live predicted bar: its own slot after the history, so the last
+  // real candle is never overwritten. Violet + translucent = "model output,
+  // not observed data". Height eases toward whatever the API last returned.
+  const predX = startX + historyCount * spacing;
+  const predBar = BABYLON.MeshBuilder.CreateBox("predBar", { width: 0.7, height: 1, depth: 0.5 }, scene);
+  const predMat = new BABYLON.StandardMaterial("predMat", scene);
+  predMat.emissiveColor = new BABYLON.Color3(0.65, 0.55, 0.98).scale(0.7);
+  predMat.diffuseColor = new BABYLON.Color3(0.65, 0.55, 0.98);
+  predMat.alpha = 0.8;
+  predBar.material = predMat;
+  const predLabel = makeLabel("PREDICTED", new BABYLON.Vector3(predX, 1, 1.4), "#a78bfa");
+
+  const predHeightOf = v => Math.min(Math.max(toY(v), 0.08), chartHeight * 1.4);
+  const predState = { current: predHeightOf(data.prediction.value), target: predHeightOf(data.prediction.value) };
+  predBar.position.x = predX;
+  predBar.position.z = 2;
+  scene.registerBeforeRender(() => {
+    predState.current += (predState.target - predState.current) * 0.15;
+    predBar.scaling.y = predState.current;
+    predBar.position.y = predState.current / 2;
+    predLabel.position.y = predState.current + 0.6;
+  });
+  const setPredictedValue = v => { predState.target = predHeightOf(v); };
 
   // ================================================================
   // MODELLING AREA -- floating prediction orb + confidence gauge
@@ -429,23 +460,22 @@ function buildScene(engine, data) {
   particleSystem.direction2 = new BABYLON.Vector3(0, 0.35, 0);
   particleSystem.start();
 
-  return { scene, camera, barMeshes, maxVal: maxVal, minVal, range, chartHeight, series };
+  return { scene, camera, setPredictedValue };
 }
 
-// Rescales the LAST candle body toward a new predicted price, with a
-// smooth grow/shrink animation -- this is what makes a slider drag
-// or an attack visually register in the 3D space.
-function animateLastBarTo(barMeshes, minVal, range, chartHeight, newValue) {
-  const bar = barMeshes[barMeshes.length - 1];
-  const toY = v => ((v - minVal) / range) * chartHeight + 0.3;
-  const targetHeight = Math.max(toY(newValue) - 0.3, 0.08);
-  const currentHeight = bar.getBoundingInfo().boundingBox.extendSize.y * 2 * bar.scaling.y;
-  const scaleFactor = targetHeight / (currentHeight / bar.scaling.y);
-
-  BABYLON.Animation.CreateAndStartAnimation(
-    "barGrow", bar, "scaling.y", 30, 20, bar.scaling.y, scaleFactor, 0
-  );
-  bar.position.y = targetHeight / 2;
+function updateContributions(data, contributions) {
+  const scale = Math.max(1, ...Object.values(contributions).map(Math.abs)); // $1 floor so tiny effects stay tiny
+  data.inputs.forEach(input => {
+    const v = contributions[input.key];
+    if (v === undefined) return;
+    const pct = Math.min(100, (Math.abs(v) / scale) * 100) / 2; // half-width of the track
+    const fill = document.getElementById(`contribFill_${input.key}`);
+    fill.style.width = `${pct}%`;
+    fill.style.left = v >= 0 ? "50%" : `${50 - pct}%`;
+    fill.style.background = v >= 0 ? "#5eead4" : "#d97757";
+    document.getElementById(`contribNum_${input.key}`).textContent =
+      `${v >= 0 ? "+" : "-"}$${Math.abs(v).toFixed(2)}`;
+  });
 }
 
 function bindUI(data, onInputChange) {
@@ -455,6 +485,11 @@ function bindUI(data, onInputChange) {
     wrapper.innerHTML = `
       <div class="row"><span>${input.label}</span><span class="val" id="val_${input.key}">${input.default}</span></div>
       <input type="range" id="slider_${input.key}" min="${input.min}" max="${input.max}" step="0.01" value="${input.default}">
+      <div class="contrib">
+        <span class="imp" title="Global feature importance from the Random Forest">${input.importance != null ? `imp ${Math.round(input.importance * 100)}%` : ""}</span>
+        <div class="track"><div class="fill" id="contribFill_${input.key}"></div></div>
+        <span class="num" id="contribNum_${input.key}">--</span>
+      </div>
     `;
     container.appendChild(wrapper);
 
@@ -523,32 +558,40 @@ async function main() {
   const apiOnline = await checkApiStatus();
 
   engine = await createEngine();
-  const { scene, camera, barMeshes, minVal, range, chartHeight } = buildScene(engine, data);
+  const { scene, camera, setPredictedValue } = buildScene(engine, data);
   window.__scene = scene; // handy for debugging in devtools
 
   const attackBtn = document.getElementById("attackBtn");
   if (!apiOnline) attackBtn.disabled = true;
 
-  // --- live prediction on slider change, debounced so it doesn't
-  // fire a request on every pixel of a drag ---
-  const updatePrediction = debounce(async () => {
+  // --- live prediction: updates the number, the predicted bar and the
+  // per-feature contribution bars. Sequence-numbered so a slow earlier
+  // response can't overwrite a newer one. ---
+  let latestRequest = 0;
+  const fetchPrediction = async () => {
     if (!apiOnline) return; // no API -- sliders just show local values, no live prediction
-    const inputs = readSliderValues(data);
+    const requestId = ++latestRequest;
     try {
       const res = await fetch(`${API_BASE_URL}/api/predict`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(inputs)
+        body: JSON.stringify(readSliderValues(data))
       });
+      if (!res.ok) return;
       const result = await res.json();
+      if (requestId !== latestRequest) return;
       document.getElementById("predVal").textContent = `$${result.prediction}`;
-      animateLastBarTo(barMeshes, minVal, range, chartHeight, result.prediction);
+      setPredictedValue(result.prediction);
+      if (result.contributions) updateContributions(data, result.contributions);
     } catch (err) {
       console.error("Prediction request failed:", err);
     }
-  }, 250);
+  };
+  // debounced so a slider drag doesn't fire a request on every pixel
+  const updatePrediction = debounce(fetchPrediction, 250);
 
   bindUI(data, updatePrediction);
+  fetchPrediction(); // populate the contribution bars for the starting inputs
 
   // --- adversarial attack ---
   attackBtn.addEventListener("click", async () => {
@@ -571,7 +614,8 @@ async function main() {
       predEl.style.color = "#f87171";
       predEl.textContent = `$${attack.attacked_prediction}`;
       setSliderValues(data, attack.perturbed_inputs);
-      animateLastBarTo(barMeshes, minVal, range, chartHeight, attack.attacked_prediction);
+      setPredictedValue(attack.attacked_prediction);
+      fetchPrediction(); // refresh contribution bars for the perturbed inputs
 
       console.log(
         `Attack shifted prediction from $${attack.original_prediction} to ` +

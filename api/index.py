@@ -17,10 +17,14 @@ Routes:
 
 import os
 import pickle
+import warnings
 
 import numpy as np
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+
+# model was fitted on a DataFrame; we predict from plain arrays (no pandas here)
+warnings.filterwarnings("ignore", message="X does not have valid feature names")
 
 app = Flask(__name__)
 CORS(app)
@@ -33,6 +37,7 @@ with open(MODEL_PATH, "rb") as f:
 MODEL = BUNDLE["model"]
 FEATURE_COLUMNS = BUNDLE["feature_columns"]
 BASELINE_CLOSE = BUNDLE["baseline_close"]
+REFERENCE = BUNDLE["reference"]  # median training values -- "a typical day"
 
 INPUT_BOUNDS = {
     "volume_norm": (0, 100),
@@ -45,6 +50,23 @@ def _predict(inputs: dict) -> float:
     row = np.array([[inputs[col] for col in FEATURE_COLUMNS]])
     predicted_return = float(MODEL.predict(row)[0])
     return round(BASELINE_CLOSE * (1 + predicted_return), 2)
+
+
+def _contributions(inputs: dict) -> dict:
+    """
+    One-at-a-time local attribution: dollars the prediction moves because
+    each feature sits at its current value instead of the typical (median)
+    training value, other inputs held as given. Mirrors
+    src/model.py:feature_contributions.
+    """
+    rows = [[inputs[c] for c in FEATURE_COLUMNS]]
+    for i, col in enumerate(FEATURE_COLUMNS):
+        alt = list(rows[0])
+        alt[i] = REFERENCE[col]
+        rows.append(alt)
+
+    prices = BASELINE_CLOSE * (1 + MODEL.predict(np.array(rows)))
+    return {col: round(float(prices[0] - prices[i + 1]), 2) for i, col in enumerate(FEATURE_COLUMNS)}
 
 
 def _missing_fields(body: dict) -> list[str]:
@@ -64,7 +86,7 @@ def predict():
         return jsonify({"error": f"Missing fields: {missing}"}), 400
 
     prediction = _predict(body)
-    return jsonify({"prediction": prediction, "inputs_used": body})
+    return jsonify({"prediction": prediction, "inputs_used": body, "contributions": _contributions(body)})
 
 
 @app.route("/api/adversarial-attack", methods=["POST"])

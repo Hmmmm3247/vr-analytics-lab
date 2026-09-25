@@ -42,6 +42,7 @@ def build_scene_payload(
     df: pd.DataFrame,
     prediction_result: dict,
     series_length: int = 12,
+    importances: dict | None = None,
 ) -> dict:
     """
     df: the engineered DataFrame (must have FEATURE_COLUMNS + Close).
@@ -54,15 +55,16 @@ def build_scene_payload(
     latest = prediction_result["inputs_used"]
     for col in FEATURE_COLUMNS:
         meta = INPUT_METADATA[col]
-        inputs.append(
-            {
-                "key": col,
-                "label": meta["label"],
-                "min": meta["min"],
-                "max": meta["max"],
-                "default": round(float(latest[col]), 2),
-            }
-        )
+        entry = {
+            "key": col,
+            "label": meta["label"],
+            "min": meta["min"],
+            "max": meta["max"],
+            "default": round(float(latest[col]), 2),
+        }
+        if importances:
+            entry["importance"] = round(importances[col], 4)
+        inputs.append(entry)
 
     recent_series = (
         df["Close"].tail(series_length).round(2).tolist()

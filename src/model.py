@@ -26,6 +26,8 @@ class TrainedModel:
     r2: float             # in dollars, same reconstruction
     return_r2: float      # in RETURN terms -- the honest number, see note below
     feature_columns: list[str]
+    reference: dict | None = None    # median training-set feature values ("a typical day")
+    importances: dict | None = None  # RandomForest global feature_importances_, sums to 1
 
 
 def train_baseline_model(df: pd.DataFrame, test_size: float = 0.2) -> TrainedModel:
@@ -70,7 +72,13 @@ def train_baseline_model(df: pd.DataFrame, test_size: float = 0.2) -> TrainedMod
     return_r2 = r2_score(y_test, predicted_returns)
 
     return TrainedModel(
-        model=model, mae=mae, r2=r2, return_r2=return_r2, feature_columns=FEATURE_COLUMNS
+        model=model,
+        mae=mae,
+        r2=r2,
+        return_r2=return_r2,
+        feature_columns=FEATURE_COLUMNS,
+        reference={c: float(v) for c, v in X_train.median().items()},
+        importances={c: float(v) for c, v in zip(FEATURE_COLUMNS, model.feature_importances_)},
     )
 
 
@@ -116,3 +124,23 @@ def predict_with_overrides(trained: TrainedModel, overrides: dict, baseline_clos
     predicted_return = float(trained.model.predict(row)[0])
     prediction = baseline_close * (1 + predicted_return)
     return {"prediction": round(prediction, 2), "inputs_used": overrides}
+
+
+def feature_contributions(trained: TrainedModel, overrides: dict, baseline_close: float) -> dict:
+    """
+    One-at-a-time local attribution: for each feature, how many dollars
+    the prediction moves because that feature sits at its current value
+    instead of the typical (median) training value, other inputs held
+    as given. Contributions don't sum exactly to the total shift from
+    a fully-typical day because features interact in a tree model.
+    """
+    cols = trained.feature_columns
+    rows = [{c: overrides[c] for c in cols}]
+    for col in cols:
+        alt = dict(rows[0])
+        alt[col] = trained.reference[col]
+        rows.append(alt)
+
+    returns = trained.model.predict(pd.DataFrame(rows))
+    prices = baseline_close * (1 + returns)
+    return {col: round(float(prices[0] - prices[i + 1]), 2) for i, col in enumerate(cols)}

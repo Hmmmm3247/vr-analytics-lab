@@ -25,7 +25,12 @@ from flask_cors import CORS
 
 from src.data_loader import load_or_synthesize
 from src.features import engineer_features
-from src.model import train_baseline_model, predict_latest, predict_with_overrides
+from src.model import (
+    train_baseline_model,
+    predict_latest,
+    predict_with_overrides,
+    feature_contributions,
+)
 from src.adversarial import run_adversarial_attack
 from src.export_scene_data import build_scene_payload
 
@@ -63,6 +68,7 @@ def predict():
         return jsonify({"error": f"Missing fields: {missing}"}), 400
 
     result = predict_with_overrides(STATE["trained"], overrides, STATE["baseline_close"])
+    result["contributions"] = feature_contributions(STATE["trained"], overrides, STATE["baseline_close"])
     return jsonify(result)
 
 
@@ -105,7 +111,7 @@ def load_and_train(csv_path: str, ticker: str | None) -> None:
 
     dataset_id = (ticker or "synthetic").lower()
     label = f"{ticker or 'Synthetic Stock'} — Historical Price Data"
-    payload = build_scene_payload(dataset_id, label, feat_df, result)
+    payload = build_scene_payload(dataset_id, label, feat_df, result, importances=trained.importances)
 
     STATE["trained"] = trained
     STATE["baseline_close"] = result["baseline_close"]

@@ -11,3 +11,4 @@ data/raw/*.csv
 
 # superseded by scene/scene_data.json (train_and_save.py writes there now)
 exports/
+.vercel

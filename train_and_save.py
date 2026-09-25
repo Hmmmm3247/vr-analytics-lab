@@ -36,12 +36,13 @@ def run(csv_path: str, ticker: str | None) -> None:
 
     dataset_id = (ticker or "synthetic").lower()
     label = f"{ticker or 'Synthetic Stock'} — Historical Price Data"
-    payload = build_scene_payload(dataset_id, label, feat_df, result)
+    payload = build_scene_payload(dataset_id, label, feat_df, result, importances=trained.importances)
     save_scene_payload(payload, "scene/scene_data.json")
 
     bundle = {
         "model": trained.model,
         "feature_columns": trained.feature_columns,
+        "reference": trained.reference,
         "baseline_close": result["baseline_close"],
         "mae": trained.mae,
         "return_r2": trained.return_r2,
