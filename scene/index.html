@@ -138,6 +138,17 @@ function buildScene(engine, data) {
   const camera = new BABYLON.UniversalCamera("cam", new BABYLON.Vector3(0, 1.7, -12), scene);
   camera.attachControl(canvas, true);
   camera.speed = 0.3;
+
+  // scroll/pinch to dolly toward or away from the chart, clamped so you
+  // can't clip through the candles or scroll off into the void
+  const chartCenter = new BABYLON.Vector3(0, 1.7, 0);
+  canvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const step = Math.sign(e.deltaY) * 0.6;
+    const nextPos = camera.position.add(camera.getForwardRay().direction.scale(-step));
+    const dist = BABYLON.Vector3.Distance(nextPos, chartCenter);
+    if (dist > 3 && dist < 22) camera.position = nextPos;
+  }, { passive: false });
   camera.keysUp.push(87);    // W
   camera.keysDown.push(83);  // S
   camera.keysLeft.push(65);  // A
@@ -317,12 +328,15 @@ function buildScene(engine, data) {
     trendTube.material = trendMat;
   }
 
-  // floating price labels above first/last candle (billboarded text)
+  // floating price labels above first/last candle (billboarded text).
+  // Texture/plane width scales with the string so longer labels (e.g.
+  // "100% CONFIDENCE") don't get clipped by a fixed-width canvas.
   function makeLabel(text, position, color) {
-    const plane = BABYLON.MeshBuilder.CreatePlane(`label_${text}`, { width: 2, height: 0.5 }, scene);
+    const texWidth = Math.max(256, text.length * 26 + 40);
+    const plane = BABYLON.MeshBuilder.CreatePlane(`label_${text}`, { width: 2 * (texWidth / 256), height: 0.5 }, scene);
     plane.position = position;
     plane.billboardMode = BABYLON.Mesh.BILLBOARDMODE_ALL;
-    const tex = new BABYLON.DynamicTexture(`labelTex_${text}`, { width: 256, height: 64 }, scene, false);
+    const tex = new BABYLON.DynamicTexture(`labelTex_${text}`, { width: texWidth, height: 64 }, scene, false);
     tex.hasAlpha = true;
     tex.drawText(text, null, 44, "bold 40px monospace", color, "transparent", true);
     const mat = new BABYLON.StandardMaterial(`labelMat_${text}`, scene);
@@ -342,6 +356,7 @@ function buildScene(engine, data) {
   // --- live predicted bar: its own slot after the history, so the last
   // real candle is never overwritten. Violet + translucent = "model output,
   // not observed data". Height eases toward whatever the API last returned.
+  const confidence = data.prediction.confidence ?? 0;
   const predX = startX + historyCount * spacing;
   const predBar = BABYLON.MeshBuilder.CreateBox("predBar", { width: 0.7, height: 1, depth: 0.5 }, scene);
   const predMat = new BABYLON.StandardMaterial("predMat", scene);
@@ -350,6 +365,24 @@ function buildScene(engine, data) {
   predMat.alpha = 0.8;
   predBar.material = predMat;
   const predLabel = makeLabel("PREDICTED", new BABYLON.Vector3(predX, 1, 1.4), "#a78bfa");
+
+  // confidence ring at the base: brighter + steadier when the model's
+  // return R^2 is higher, dim + jittery when it's low -- a second,
+  // honest read on "how much should I trust this bar" right where
+  // you're already looking, not just in the sidebar percentage.
+  const predRing = BABYLON.MeshBuilder.CreateTorus("predRing", { diameter: 1.15, thickness: 0.045, tessellation: 32 }, scene);
+  predRing.position.set(predX, 0.05, 2);
+  const predRingMat = new BABYLON.StandardMaterial("predRingMat", scene);
+  predRingMat.emissiveColor = new BABYLON.Color3(0.65, 0.55, 0.98);
+  predRing.material = predRingMat;
+  const pulseSpeed = 1 + (1 - confidence) * 4; // low confidence pulses faster/jitterier
+  scene.registerBeforeRender(() => {
+    const t = performance.now() * 0.001;
+    const pulse = 0.5 + 0.5 * Math.sin(t * pulseSpeed);
+    predRingMat.alpha = 0.15 + confidence * 0.5 + pulse * (0.15 + (1 - confidence) * 0.35);
+    const jitter = (1 - confidence) * 0.12 * Math.sin(t * pulseSpeed * 1.3);
+    predRing.scaling.x = predRing.scaling.z = 1 + jitter;
+  });
 
   const predHeightOf = v => Math.min(Math.max(toY(v), 0.08), chartHeight * 1.4);
   const predState = { current: predHeightOf(data.prediction.value), target: predHeightOf(data.prediction.value) };
@@ -377,7 +410,6 @@ function buildScene(engine, data) {
 
   // confidence gauge: an arc built from tube segments, filled
   // proportionally to data.prediction.confidence (0-1)
-  const confidence = data.prediction.confidence ?? 0;
   const gaugeRadius = 1.6;
   const totalSegments = 40;
   const filledSegments = Math.round(totalSegments * confidence);
