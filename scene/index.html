@@ -139,16 +139,36 @@ function buildScene(engine, data) {
   camera.attachControl(canvas, true);
   camera.speed = 0.3;
 
-  // scroll/pinch to dolly toward or away from the chart, clamped so you
-  // can't clip through the candles or scroll off into the void
+  // mouse wheel / trackpad scroll+pinch to dolly toward or away from the
+  // chart, clamped so you can't clip through the candles or scroll off
+  // into the void
   const chartCenter = new BABYLON.Vector3(0, 1.7, 0);
-  canvas.addEventListener("wheel", (e) => {
-    e.preventDefault();
-    const step = Math.sign(e.deltaY) * 0.6;
-    const nextPos = camera.position.add(camera.getForwardRay().direction.scale(-step));
+  const dollyTo = (step) => {
+    const nextPos = camera.position.add(camera.getForwardRay().direction.scale(step));
     const dist = BABYLON.Vector3.Distance(nextPos, chartCenter);
     if (dist > 3 && dist < 22) camera.position = nextPos;
+  };
+  canvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    dollyTo(-Math.sign(e.deltaY) * 0.6);
   }, { passive: false });
+
+  // touchscreen pinch (phones/tablets) -- wheel/trackpad above don't fire
+  // touch events, so this is a separate gesture: track the distance
+  // between two fingers and dolly by how much it changes each frame.
+  let pinchDist = null;
+  const touchDistance = (touches) =>
+    Math.hypot(touches[0].clientX - touches[1].clientX, touches[0].clientY - touches[1].clientY);
+  canvas.addEventListener("touchmove", (e) => {
+    if (e.touches.length !== 2) { pinchDist = null; return; }
+    e.preventDefault();
+    const dist = touchDistance(e.touches);
+    if (pinchDist !== null) dollyTo((dist - pinchDist) * 0.02); // fingers apart -> zoom in
+    pinchDist = dist;
+  }, { passive: false });
+  canvas.addEventListener("touchend", (e) => {
+    if (e.touches.length < 2) pinchDist = null;
+  });
   camera.keysUp.push(87);    // W
   camera.keysDown.push(83);  // S
   camera.keysLeft.push(65);  // A
